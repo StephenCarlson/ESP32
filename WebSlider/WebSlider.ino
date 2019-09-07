@@ -17,6 +17,7 @@
 #define LEDC_BASE_FREQ     50000
 #define LED_PIN            5
 
+unsigned long lastTime = 0;
 
 // Replace with your network credentials
 const char* ssid     = "Xfinityandbeyond";
@@ -37,8 +38,12 @@ void setup() {
   Serial.begin(115200);
 
 //  myservo.attach(servoPin);  // attaches the servo on the servoPin to the servo object
-  ledcSetup(LEDC_CHANNEL, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
-  ledcAttachPin(LED_PIN, LEDC_CHANNEL);
+  ledcSetup(0, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  ledcSetup(1, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  ledcAttachPin(5, 0);
+  ledcAttachPin(18, 1);
+  pinMode(23, OUTPUT);
+  digitalWrite(23, HIGH);
 
   // Connect to Wi-Fi network with SSID and password
   Serial.print("Connecting to ");
@@ -57,6 +62,13 @@ void setup() {
 }
 
 void loop(){
+  unsigned long localTimestamp = micros();
+  if((localTimestamp-5000)>lastTime){
+    lastTime = localTimestamp;
+    digitalWrite(23, LOW);
+    delayMicroseconds(20);
+    digitalWrite(23, HIGH);
+  }
   WiFiClient client = server.available();   // Listen for incoming clients
 
   if (client) {                             // If a new client connects,
@@ -90,14 +102,20 @@ void loop(){
                      
             // Web Page
             client.println("</head><body><h1>ESP32 PWM Slider</h1>");
-            client.println("<p>PWM Value: <span id=\"servoPos\"></span></p>");          
+            client.println("<p>PWM1 Value: <span id=\"servoPos\"></span></p>");          
             client.println("<input type=\"range\" min=\"0\" max=\"255\" class=\"slider\" id=\"servoSlider\" onchange=\"servo(this.value)\" value=\""+valueString+"\"/>");
+            client.println("<p>PWM2 Value: <span id=\"servo2Pos\"></span></p>");          
+            client.println("<input type=\"range\" min=\"0\" max=\"255\" class=\"slider\" id=\"servo2Slider\" onchange=\"servo2(this.value)\" value=\""+valueString+"\"/>");
             
             client.println("<script>var slider = document.getElementById(\"servoSlider\");");
+            client.println("var slider2 = document.getElementById(\"servo2Slider\");");
             client.println("var servoP = document.getElementById(\"servoPos\"); servoP.innerHTML = slider.value;");
+            client.println("var servo2P = document.getElementById(\"servo2Pos\"); servo2P.innerHTML = slider2.value;");
             client.println("slider.oninput = function() { slider.value = this.value; servoP.innerHTML = this.value; }");
-            client.println("$.ajaxSetup({timeout:1000}); function servo(pos) { ");
-            client.println("$.get(\"/?value=\" + pos + \"&\"); {Connection: close};}</script>");
+            client.println("slider2.oninput = function() { slider2.value = this.value; servo2P.innerHTML = this.value; }");
+            client.println("$.ajaxSetup({timeout:1000});");
+            client.println(" function servo(pos) { $.get(\"/?value=\" + pos + \"&\"); {Connection: close};}");
+            client.println(" function servo2(pos) { $.get(\"/?value2=\" + pos + \"&\"); {Connection: close};}</script>");
            
             client.println("</body></html>");     
             
@@ -109,9 +127,21 @@ void loop(){
               
               //Rotate the servo
 //              myservo.write(valueString.toInt());
-              ledcWrite(LEDC_CHANNEL, valueString.toInt());
+              ledcWrite(0, valueString.toInt());
               Serial.println(valueString); 
             }         
+
+            //GET /?value=180& HTTP/1.1
+            if(header.indexOf("GET /?value2=")>=0) {
+              pos1 = header.indexOf('=');
+              pos2 = header.indexOf('&');
+              valueString = header.substring(pos1+1, pos2);
+              
+              //Rotate the servo
+//              myservo.write(valueString.toInt());
+              ledcWrite(1, valueString.toInt());
+              Serial.println(valueString); 
+            }   
             // The HTTP response ends with another blank line
             client.println();
             // Break out of the while loop
