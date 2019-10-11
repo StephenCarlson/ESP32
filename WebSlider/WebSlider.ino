@@ -3,6 +3,16 @@
   Complete project details at https://randomnerdtutorials.com  
 *********/
 
+
+// Steve's Notes:
+// http://shawnhymel.com/1882/how-to-create-a-web-server-with-websockets-using-an-esp32-in-arduino/
+// https://github.com/MGX3D/EspDRO/blob/master/EspDRO.ino
+// https://techtutorialsx.com/2017/11/03/esp32-arduino-websocket-server/
+
+
+
+
+
 #include <WiFi.h>
 // #include <Servo.h>
 
@@ -12,12 +22,34 @@
 // GPIO the servo is attached to
 // static const int servoPin = 13;
 
-#define LEDC_CHANNEL     0
 #define LEDC_TIMER_RESOLUTION  8
 #define LEDC_BASE_FREQ     50000
-#define LED_PIN            5
+
+#define LEDC_EN_DRV_BOOST   0
+#define LEDC_PWM_BOOST      1
+#define LEDC_EN_DRV_BUCK    2
+#define LEDC_PWM_BUCK       3
+
+#define PIN_LED             5
+#define PIN_EN_AMPS         16
+#define PIN_VDIV_REF        18
+#define PIN_ADC_VREF        35
+#define PIN_ADC_I           34
+#define PIN_EN_DRV_BOOST    23
+#define PIN_PWM_BOOST       19
+#define PIN_EN_DRV_BUCK     22
+#define PIN_PWM_BUCK        21
+
+#define INCVAL              1
+
 
 unsigned long lastTime = 0;
+uint8_t ledState = 0;
+int16_t ampsSetpoint = 0;
+bool enableVref = false;
+int16_t filtered_vref = 0;
+int16_t filtered_amps = 0;
+int16_t integrator = 0;
 
 // Replace with your network credentials
 const char* ssid     = "Xfinityandbeyond";
@@ -38,12 +70,39 @@ void setup() {
   Serial.begin(115200);
 
 //  myservo.attach(servoPin);  // attaches the servo on the servoPin to the servo object
-  ledcSetup(0, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
-  ledcSetup(1, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
-  ledcAttachPin(5, 0);
-  ledcAttachPin(18, 1);
-  pinMode(23, OUTPUT);
-  digitalWrite(23, HIGH);
+  // ledcSetup(LEDC_EN_DRV_BOOST, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  // ledcSetup(LEDC_PWM_BOOST, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  // ledcSetup(LEDC_EN_DRV_BUCK, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  ledcSetup(LEDC_PWM_BUCK, LEDC_BASE_FREQ, LEDC_TIMER_RESOLUTION);
+  // ledcAttachPin(PIN_EN_DRV_BOOST, LEDC_EN_DRV_BOOST);
+  // ledcAttachPin(PIN_PWM_BOOST, LEDC_PWM_BOOST);
+  // ledcAttachPin(PIN_EN_DRV_BUCK, LEDC_EN_DRV_BUCK);
+  ledcAttachPin(PIN_PWM_BUCK, LEDC_PWM_BUCK);
+  pinMode(PIN_LED, OUTPUT);
+  digitalWrite(PIN_LED, HIGH);
+
+
+  pinMode(PIN_EN_AMPS, OUTPUT);
+  digitalWrite(PIN_EN_AMPS, HIGH);
+  pinMode(PIN_VDIV_REF, OUTPUT);
+  digitalWrite(PIN_VDIV_REF, LOW); // HIGH
+
+  pinMode(PIN_EN_DRV_BOOST, OUTPUT);
+  digitalWrite(PIN_EN_DRV_BOOST, LOW);
+  pinMode(PIN_PWM_BOOST, OUTPUT);
+  digitalWrite(PIN_PWM_BOOST, LOW);
+
+  pinMode(PIN_EN_DRV_BUCK, OUTPUT);
+  digitalWrite(PIN_EN_DRV_BUCK, HIGH);
+
+  analogSetSamples(4);
+  // analogSetCycles(128);
+  // analogSetClockDiv(64);
+  // analogSetAttenuation(ADC_11db); // ADC_0db ADC_2_5db ADC_6db ADC_11db
+  pinMode(PIN_ADC_I, INPUT);
+  pinMode(PIN_ADC_VREF, INPUT);
+
+
 
   // Connect to Wi-Fi network with SSID and password
   Serial.print("Connecting to ");
@@ -65,10 +124,66 @@ void loop(){
   unsigned long localTimestamp = micros();
   if((localTimestamp-5000)>lastTime){
     lastTime = localTimestamp;
-    digitalWrite(23, LOW);
-    delayMicroseconds(20);
-    digitalWrite(23, HIGH);
+    ledState = (ledState)? 0 : 1;
+    digitalWrite(PIN_LED, ledState);
+
+    // Enable SyncFET (Disables Diode, hazardous)
+    // digitalWrite(PIN_EN_DRV_BOOST, HIGH);
+    // digitalWrite(PIN_PWM_BOOST, LOW);
+    // delayMicroseconds(20);
+    // digitalWrite(PIN_EN_DRV_BOOST, HIGH);
+    // digitalWrite(PIN_PWM_BOOST, HIGH);
+
+    uint16_t measured_vref = analogRead(PIN_ADC_VREF);
+    uint16_t measured_amps = analogRead(PIN_ADC_I);
+
+    // e(t) = r(t) - y(t) , u(t) = K_p*e(t)
+    // uint16_t setpoint = (measured_vref > 2000)? 0 : 200;
+    // int16_t error = setpoint - measured_amps;
+    // int16_t control = (error<0)? 0 : 
+
+    filtered_vref = filtered_vref + measured_vref/8 - filtered_vref/8;
+    filtered_amps = filtered_amps + measured_amps/8 - filtered_amps/8;
+
+    int16_t measured = (filtered_amps - filtered_vref); // 4096 worst case
+    int16_t error    = ampsSetpoint - measured; // Setpoint is 2550 worst case
+    integrator = integrator + error/16; 
+    integrator = (integrator<-500)? -500 : (integrator>500)? 500 : integrator;
+    int16_t control  = error*2 + integrator;
+    uint8_t buckPwm  = (control<0)? 0 : (control>230)? 230 : control;
+
+    // buckPwm = (ampsMeasured >= (ampsSetpoint*10))? \ 
+    //   ( (buckPwm>(0  +INCVAL))? (buckPwm-INCVAL) : 0   ): \
+    //   ( (buckPwm<(230-INCVAL))? (buckPwm+INCVAL) : 230 );
+
+
+
+    ledcWrite(LEDC_PWM_BUCK, buckPwm);
+
+    // if(ampsMeasured < 10) {
+    //   digitalWrite(PIN_EN_DRV_BOOST, LOW);
+    //   digitalWrite(PIN_PWM_BOOST, LOW);
+    // }
+
+
+    digitalWrite(PIN_VDIV_REF, ((enableVref)? HIGH : LOW) );
+
+
+    Serial.print("vref,amps,meas,set,intg,buck:");
+    Serial.print(measured_vref);
+    Serial.print(",");
+    Serial.print(measured_amps);
+    Serial.print(",");
+    Serial.print(measured);
+    Serial.print(",");
+    Serial.print(ampsSetpoint);
+    Serial.print(",");
+    Serial.print(integrator);
+    Serial.print(",");
+    Serial.println(buckPwm);
   }
+  
+  
   WiFiClient client = server.available();   // Listen for incoming clients
 
   if (client) {                             // If a new client connects,
@@ -127,7 +242,8 @@ void loop(){
               
               //Rotate the servo
 //              myservo.write(valueString.toInt());
-              ledcWrite(0, valueString.toInt());
+              // ledcWrite(LEDC_PWM_BOOST, valueString.toInt());
+              ampsSetpoint = (10 * valueString.toInt());
               Serial.println(valueString); 
             }         
 
@@ -139,7 +255,8 @@ void loop(){
               
               //Rotate the servo
 //              myservo.write(valueString.toInt());
-              ledcWrite(1, valueString.toInt());
+              // ledcWrite(LEDC_EN_DRV_BOOST, valueString.toInt());
+              enableVref = (valueString.toInt() >= 127);
               Serial.println(valueString); 
             }   
             // The HTTP response ends with another blank line
